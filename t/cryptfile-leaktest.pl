@@ -18,7 +18,7 @@
 #   from the top-level directory.
 #
 # COPYRIGHT
-#   Copyright (C) 2004-2006 Steve Hay.  All rights reserved.
+#   Copyright (C) 2004-2006, 2014 Steve Hay.  All rights reserved.
 #
 # LICENCE
 #   You may distribute under the terms of either the GNU General Public License
@@ -26,7 +26,7 @@
 #
 #===============================================================================
 
-use 5.006000;
+use 5.008001;
 
 use strict;
 use warnings;
@@ -62,8 +62,6 @@ MAIN: {
     my $prog = qq[print "Hello, world.\\n";\n];
 
     my($fh, $interrupted, $i);
-
-    unlink $file or die "Can't delete file '$file': $!\n" if -e $file;
 
     open $fh, ">$file" or die "Can't create file '$file': $!\n";
     print $fh $prog;

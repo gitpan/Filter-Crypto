@@ -7,7 +7,8 @@
 #   Test script to check PAR::Filter::Crypto module (and decryption filter).
 #
 # COPYRIGHT
-#   Copyright (C) 2004-2006, 2008-2009, 2012 Steve Hay.  All rights reserved.
+#   Copyright (C) 2004-2006, 2008-2009, 2012, 2014 Steve Hay.  All rights
+#   reserved.
 #
 # LICENCE
 #   You may distribute under the terms of either the GNU General Public License
@@ -15,7 +16,7 @@
 #
 #===============================================================================
 
-use 5.006000;
+use 5.008001;
 
 use strict;
 use warnings;
@@ -26,6 +27,8 @@ use File::Spec::Functions qw(canonpath catdir catfile curdir updir);
 use FindBin qw($Bin);
 use Test::More;
 
+sub new_filename();
+
 #===============================================================================
 # INITIALIZATION
 #===============================================================================
@@ -33,6 +36,12 @@ use Test::More;
 my($pp);
 
 BEGIN {
+    my $i = 0;
+    sub new_filename() {
+        $i++;
+        return "test$i$Config{_exe}";
+    }
+
     my $top_dir = canonpath(abs_path(catdir($Bin, updir())));
     my $lib_dir = catfile($top_dir, 'blib', 'lib', 'Filter', 'Crypto');
 
@@ -74,23 +83,14 @@ BEGIN {
 #===============================================================================
 
 MAIN: {
-    my $fh;
-    my $mbfile = 'myblib.pm';
-    my $mbname = 'myblib';
     my $ifile  = 'test.pl';
-    my $ofile  = "test$Config{_exe}";
     my $str    = 'Hello, world.';
     my $prog   = qq[use strict; print "$str\\n";\n];
     my $head   = 'use Filter::Crypto::Decrypt;';
-
-    # Before 5.7.3, -Mblib emitted a "Using ..." message on STDERR, which looks
-    # ugly when we spawn a child perl process and breaks the --silent test.
-    open $fh, ">$mbfile" or die "Can't create file '$mbfile': $!\n";
-    print $fh qq[local \$SIG{__WARN__} = sub { };\neval 'use blib';\n1;\n];
-    close $fh;
+    my $qrhead = qr/^\Q$head\E/o;
 
     my $perl_exe = $^X =~ / /o ? qq["$^X"] : $^X;
-    my $perl = qq[$perl_exe -M$mbname];
+    my $perl = qq[$perl_exe -Mblib];
 
     my $have_archive_zip = eval { require Archive::Zip; 1 };
     my $have_broken_module_scandeps;
@@ -98,80 +98,85 @@ MAIN: {
         $have_broken_module_scandeps = ($Module::ScanDeps::VERSION eq '0.75');
     }
 
-    my($line, $cur_ofile);
-
-    unlink $ifile or die "Can't delete file '$ifile': $!\n" if -e $ifile;
-    unlink $ofile or die "Can't delete file '$ofile': $!\n" if -e $ofile;
+    my($fh, $ofile, $line, $cur_ofile);
 
     open $fh, ">$ifile" or die "Can't create file '$ifile': $!\n";
     print $fh $prog;
     close $fh;
 
-    qx{$perl $pp -f Crypto -M Filter::Crypto::Decrypt -o $ofile $ifile};
-    is($?, 0, 'pp -f Crypto exited successfully');
-    cmp_ok(-s $ofile, '>', 0, '... and created a non-zero size PAR archive');
+    {
+        $ofile = new_filename();
 
-    SKIP: {
-        skip 'Archive::Zip required to inspect PAR archive', 5
-            unless $have_archive_zip;
+        qx{$perl $pp -f Crypto -M Filter::Crypto::Decrypt -o $ofile $ifile};
+        is($?, 0, 'pp -f Crypto exited successfully');
+        cmp_ok(-s $ofile, '>', 0, '... and created a non-zero size PAR archive');
 
-        my $zip = Archive::Zip->new() or die "Can't create new Archive::Zip\n";
-        my $ret = eval { $zip->read($ofile) };
-        is($@, '', 'No exceptions were thrown reading the PAR archive');
-        is($ret, Archive::Zip::AZ_OK(), '... and read() returned OK');
-        like($zip->contents("script/$ifile"), qr/^\Q$head\E/,
-             '... and the script contents are as expected');
-        unlike($zip->contents("lib/strict.pm"), qr/^\Q$head\E/,
-             '... and the included module contents are as expected');
-        unlike($zip->contents("lib/Filter/Crypto/Decrypt.pm"), qr/^\Q$head\E/,
-             '... and the decryption module contents are as expected');
+        SKIP: {
+            skip 'Archive::Zip required to inspect PAR archive', 5
+                unless $have_archive_zip;
+
+            my $zip = Archive::Zip->new() or die "Can't create new Archive::Zip\n";
+            my $ret = eval { $zip->read($ofile) };
+            is($@, '', 'No exceptions were thrown reading the PAR archive');
+            is($ret, Archive::Zip::AZ_OK(), '... and read() returned OK');
+            like($zip->contents("script/$ifile"), $qrhead,
+                 '... and the script contents are as expected');
+            unlike($zip->contents("lib/strict.pm"), $qrhead,
+                 '... and the included module contents are as expected');
+            unlike($zip->contents("lib/Filter/Crypto/Decrypt.pm"), $qrhead,
+                 '... and the decryption module contents are as expected');
+        }
+
+        SKIP: {
+            skip "Module::ScanDeps $Module::ScanDeps::VERSION is broken", 1
+                if $have_broken_module_scandeps;
+
+            # Some platforms search the directories in PATH before the current
+            # directory so be explicit which file we want to run.
+            $cur_ofile = catfile(curdir(), $ofile);
+            chomp($line = qx{$cur_ofile});
+            is($line, $str, 'Running the PAR archive produces the expected output');
+        }
+
+        unlink $ofile;
     }
 
-    SKIP: {
-        skip "Module::ScanDeps $Module::ScanDeps::VERSION is broken", 1
-            if $have_broken_module_scandeps;
+    {
+        $ofile = new_filename();
 
-        # Some platforms search the directories in PATH before the current
-        # directory so be explicit which file we want to run.
-        $cur_ofile = catfile(curdir(), $ofile);
-        chomp($line = qx{$cur_ofile});
-        is($line, $str, 'Running the PAR archive produces the expected output');
+        qx{$perl $pp -f Crypto -F Crypto -M Filter::Crypto::Decrypt -o $ofile $ifile};
+        is($?, 0, 'pp -f Crypto -F Crypto exited successfully');
+        cmp_ok(-s $ofile, '>', 0, '... and created a non-zero size PAR archive');
+
+        SKIP: {
+            skip 'Archive::Zip required to inspect PAR archive', 5
+                unless $have_archive_zip;
+
+            my $zip = Archive::Zip->new() or die "Can't create new Archive::Zip\n";
+            my $ret = eval { $zip->read($ofile) };
+            is($@, '', 'No exceptions were thrown reading the PAR archive');
+            is($ret, Archive::Zip::AZ_OK(), '... and read() returned OK');
+            like($zip->contents("script/$ifile"), $qrhead,
+                 '... and the script contents are as expected');
+            like($zip->contents("lib/strict.pm"), $qrhead,
+                 '... and the included module contents are as expected');
+            unlike($zip->contents("lib/Filter/Crypto/Decrypt.pm"), $qrhead,
+                 '... and the decryption module contents are as expected');
+        }
+
+        SKIP: {
+            skip "Module::ScanDeps $Module::ScanDeps::VERSION is broken", 1
+                if $have_broken_module_scandeps;
+
+            # Some platforms search the directories in PATH before the current
+            # directory so be explicit which file we want to run.
+            $cur_ofile = catfile(curdir(), $ofile);
+            chomp($line = qx{$cur_ofile});
+            is($line, $str, 'Running the PAR archive produces the expected output');
+        }
+
+        unlink $ofile;
     }
 
-    unlink $ofile;
-
-    qx{$perl $pp -f Crypto -F Crypto -M Filter::Crypto::Decrypt -o $ofile $ifile};
-    is($?, 0, 'pp -f Crypto -F Crypto exited successfully');
-    cmp_ok(-s $ofile, '>', 0, '... and created a non-zero size PAR archive');
-
-    SKIP: {
-        skip 'Archive::Zip required to inspect PAR archive', 5
-            unless $have_archive_zip;
-
-        my $zip = Archive::Zip->new() or die "Can't create new Archive::Zip\n";
-        my $ret = eval { $zip->read($ofile) };
-        is($@, '', 'No exceptions were thrown reading the PAR archive');
-        is($ret, Archive::Zip::AZ_OK(), '... and read() returned OK');
-        like($zip->contents("script/$ifile"), qr/^\Q$head\E/,
-             '... and the script contents are as expected');
-        like($zip->contents("lib/strict.pm"), qr/^\Q$head\E/,
-             '... and the included module contents are as expected');
-        unlike($zip->contents("lib/Filter/Crypto/Decrypt.pm"), qr/^\Q$head\E/,
-             '... and the decryption module contents are as expected');
-    }
-
-    SKIP: {
-        skip "Module::ScanDeps $Module::ScanDeps::VERSION is broken", 1
-            if $have_broken_module_scandeps;
-
-        # Some platforms search the directories in PATH before the current
-        # directory so be explicit which file we want to run.
-        $cur_ofile = catfile(curdir(), $ofile);
-        chomp($line = qx{$cur_ofile});
-        is($line, $str, 'Running the PAR archive produces the expected output');
-    }
-
-    unlink $mbfile;
     unlink $ifile;
-    unlink $ofile;
 }

@@ -6,7 +6,7 @@
  *   C and XS portions of Filter::Crypto::Decrypt module.
  *
  * COPYRIGHT
- *   Copyright (C) 2004-2009, 2012 Steve Hay.  All rights reserved.
+ *   Copyright (C) 2004-2009, 2012, 2014 Steve Hay.  All rights reserved.
  *
  * LICENCE
  *   You may distribute under the terms of either the GNU General Public License
@@ -32,7 +32,9 @@ typedef enum {
 typedef struct {
     MAGIC *mg_ptr;
     FILTER_CRYPTO_CCTX *crypto_ctx;
+    SV *encrypt_sv;
     SV *decrypt_sv;
+    SV *encode_sv;
     int filter_count;
     FILTER_CRYPTO_STATUS filter_status;
 } FILTER_CRYPTO_FCTX;
@@ -41,8 +43,7 @@ static I32 FilterCrypto_ReadBlock(pTHX_ int idx, SV *sv, int want_size);
 static FILTER_CRYPTO_FCTX *FilterCrypto_FilterAlloc(pTHX);
 static bool FilterCrypto_FilterInit(pTHX_ FILTER_CRYPTO_FCTX *ctx,
     FILTER_CRYPTO_MODE crypt_mode);
-static bool FilterCrypto_FilterUpdate(pTHX_ FILTER_CRYPTO_FCTX *ctx,
-    SV *encrypt_sv);
+static bool FilterCrypto_FilterUpdate(pTHX_ FILTER_CRYPTO_FCTX *ctx);
 static bool FilterCrypto_FilterFinal(pTHX_ FILTER_CRYPTO_FCTX *ctx);
 static void FilterCrypto_FilterFree(pTHX_ FILTER_CRYPTO_FCTX *ctx);
 static int FilterCrypto_FilterSvMgFree(pTHX_ SV *sv, MAGIC *mg);
@@ -129,9 +130,13 @@ static FILTER_CRYPTO_FCTX *FilterCrypto_FilterAlloc(pTHX) {
     /* Allocate the crypto context. */
     ctx->crypto_ctx = FilterCrypto_CryptoAlloc(aTHX);
 
-    /* Allocate the decrypt buffer. */
+    /* Allocate the encrypt, decrypt and encode buffers. */
+    ctx->encrypt_sv = newSV(BUFSIZ);
     ctx->decrypt_sv = newSV(BUFSIZ);
+    ctx->encode_sv = newSV(BUFSIZ * 2);
+    SvPOK_only(ctx->encrypt_sv);
     SvPOK_only(ctx->decrypt_sv);
+    SvPOK_only(ctx->encode_sv);
 
     return ctx;
 }
@@ -148,8 +153,10 @@ static bool FilterCrypto_FilterInit(pTHX_ FILTER_CRYPTO_FCTX *ctx,
     if (!FilterCrypto_CryptoInit(aTHX_ ctx->crypto_ctx, crypt_mode))
         return FALSE;
 
-    /* Initialize the decrypt buffer. */
+    /* Initialize the encrypt, decrypt and encode buffers. */
+    FilterCrypto_SvSetCUR(ctx->encrypt_sv, 0);
     FilterCrypto_SvSetCUR(ctx->decrypt_sv, 0);
+    FilterCrypto_SvSetCUR(ctx->encode_sv, 0);
 
     /* Initialize the filter count and status. */
     ctx->filter_count = FILTER_CRYPTO_FILTER_COUNT;
@@ -159,17 +166,16 @@ static bool FilterCrypto_FilterInit(pTHX_ FILTER_CRYPTO_FCTX *ctx,
 }
 
 /*
- * Function to update the given filter context with encrypted data in the given
- * encrypt SV.  This data is not assumed to be null-terminated, so the correct
- * length must be set in SvCUR(encrypt_sv).  The decrypted output data will be
- * written into an SV within the filter context.
+ * Function to update the given filter context with encrypted data given in an
+ * SV within the filter context.  This data is not assumed to be
+ * null-terminated, so the correct length must be set in SvCUR(ctx->encrypt_sv).
+ * The decrypted output data will be written into an SV within the filter
+ * context.
  * Returns a bool to indicate success or failure.
  */
 
-static bool FilterCrypto_FilterUpdate(pTHX_ FILTER_CRYPTO_FCTX *ctx,
-    SV *encrypt_sv)
-{
-    return FilterCrypto_CryptoUpdate(aTHX_ ctx->crypto_ctx, encrypt_sv,
+static bool FilterCrypto_FilterUpdate(pTHX_ FILTER_CRYPTO_FCTX *ctx) {
+    return FilterCrypto_CryptoUpdate(aTHX_ ctx->crypto_ctx, ctx->encrypt_sv,
             ctx->decrypt_sv);
 }
 
@@ -188,8 +194,11 @@ static bool FilterCrypto_FilterFinal(pTHX_ FILTER_CRYPTO_FCTX *ctx) {
  */
 
 static void FilterCrypto_FilterFree(pTHX_ FILTER_CRYPTO_FCTX *ctx) {
-    /* Free the decrypt buffer by decrementing its reference count (to zero). */
+    /* Free the encode, decrypt and encrypt buffers by decrementing their
+     * reference counts (to zero). */
+    SvREFCNT_dec(ctx->encode_sv);
     SvREFCNT_dec(ctx->decrypt_sv);
+    SvREFCNT_dec(ctx->encrypt_sv);
 
     /* Free the crypto context. */
     FilterCrypto_CryptoFree(aTHX_ ctx->crypto_ctx);
@@ -219,10 +228,11 @@ static int FilterCrypto_FilterSvMgFree(pTHX_ SV *sv, MAGIC *mg) {
 
 /*
  * Function to perform the source code decryption filtering.  Data is first read
- * from the input stream into an encode buffer containing a plain ASCII encoding
- * of the encrypted data, and then decoded into an encrypt buffer.  It is then
- * decrypted into a decrypt buffer within the filter context, and is finally
- * written to the output stream buffer (which is the buf_sv argument).
+ * from the input stream into an encode buffer within the filter context
+ * containing a plain ASCII encoding of the encrypted data, and then decoded
+ * into an encrypt buffer within the filter context.  It is then decrypted into
+ * a decrypt buffer within the filter context, and is finally written to the
+ * output stream buffer (which is the buf_sv argument).
  * Returns the number of bytes written to the output stream buffer, or 0 if EOF
  * was reached before anything was written, or croak()s on failure.
  * The filter is deleted when the decryption is finished or an error occurs.
@@ -240,8 +250,6 @@ static int FilterCrypto_FilterSvMgFree(pTHX_ SV *sv, MAGIC *mg) {
 static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
     FILTER_CRYPTO_FCTX *ctx;
     SV *filter_sv = FILTER_DATA(idx);
-    SV *encode_sv = sv_2mortal(newSV(BUFSIZ * 2));
-    SV *encrypt_sv = sv_2mortal(newSV(BUFSIZ));
     MAGIC *mg;
     I32 m;
     I32 n;
@@ -249,9 +257,6 @@ static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
     const unsigned char *out_ptr;
     const char *nl = "\n";
     char *p;
-
-    SvPOK_only(encode_sv);
-    SvPOK_only(encrypt_sv);
 
     /* Recover the filter context pointer that is held within the MAGIC of the
      * filter's SV, and verify that we have found the correct MAGIC. */
@@ -268,6 +273,10 @@ static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
         croak("Found wrong MAGIC in decryption filter's SV: Wrong mg_ptr "
               "\"signature\"");
     }
+
+    /* Reinitialize the encode and encrypt buffers. */
+    FilterCrypto_SvSetCUR(ctx->encode_sv, 0);
+    FilterCrypto_SvSetCUR(ctx->encrypt_sv, 0);
 
     /* Check if this is the first time through. */
     if (ctx->filter_status == FILTER_CRYPTO_STATUS_NOT_STARTED) {
@@ -288,7 +297,7 @@ static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
     while (1) {
         /* If there is anything currently in the decrypt buffer then write (part
          * of) it to the output stream buffer.  How much we write depends on
-         * what Perl has asked for. */
+         * what perl has asked for. */
         if ((m = SvCUR(ctx->decrypt_sv)) > 0) {
             out_ptr = (const unsigned char *)SvPVX_const(ctx->decrypt_sv);
 
@@ -316,7 +325,7 @@ static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
             else {
                 /* Perl has asked for a complete line of source code.  We must
                  * not return here if the decrypt buffer does not hold at least
-                 * one complete line because Perl compiles each line as it is
+                 * one complete line because perl compiles each line as it is
                  * returned and hence would generate a syntax error if we have
                  * written only part of a line to the output stream buffer.
                  * Instead, we must carry on and read some more data from the
@@ -396,13 +405,13 @@ static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
         FilterCrypto_SvSetCUR(ctx->decrypt_sv, 0);
         SvOOK_off(ctx->decrypt_sv);
 
-        n = FilterCrypto_ReadBlock(aTHX_ idx + 1, encode_sv, BUFSIZ * 2);
+        n = FilterCrypto_ReadBlock(aTHX_ idx + 1, ctx->encode_sv, BUFSIZ * 2);
         if (n > 0) {
             /* We have read a new block of data from the input stream into the
              * encode buffer, so set the length of the encode buffer and decode
              * it into the encrypt buffer. */
-            FilterCrypto_SvSetCUR(encode_sv, n);
-            if (!FilterCrypto_DecodeSV(aTHX_ encode_sv, encrypt_sv)) {
+            FilterCrypto_SvSetCUR(ctx->encode_sv, n);
+            if (!FilterCrypto_DecodeSV(aTHX_ ctx->encode_sv, ctx->encrypt_sv)) {
                 filter_del(FilterCrypto_FilterDecrypt);
                 croak("Can't continue decryption: %s",
                       FilterCrypto_GetErrStr(aTHX));
@@ -410,11 +419,11 @@ static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
 
             /* The decoding succeeded, so zero the encode buffer's length ready
              * for the next call to FilterCrypto_ReadBlock(). */
-            FilterCrypto_SvSetCUR(encode_sv, 0);
+            FilterCrypto_SvSetCUR(ctx->encode_sv, 0);
 
             /* We have decoded a new block of data from the encode buffer into
              * the encrypt buffer, so decrypt it into the decrypt buffer. */
-            if (!FilterCrypto_FilterUpdate(aTHX_ ctx, encrypt_sv)) {
+            if (!FilterCrypto_FilterUpdate(aTHX_ ctx)) {
                 filter_del(FilterCrypto_FilterDecrypt);
                 croak("Can't continue decryption: %s",
                       FilterCrypto_GetErrStr(aTHX));
@@ -422,7 +431,7 @@ static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
 
             /* The decryption succeeded, so zero the encrypt buffer's length
              * ready for the next call to FilterCrypto_ReadBlock(). */
-            FilterCrypto_SvSetCUR(encrypt_sv, 0);
+            FilterCrypto_SvSetCUR(ctx->encrypt_sv, 0);
         }
         else if (n == 0) {
             /* We did not read any data from the input stream, and have now
@@ -450,9 +459,9 @@ static I32 FilterCrypto_FilterDecrypt(pTHX_ int idx, SV *buf_sv, int max_len) {
 }
 
 /*
- * Function to determine whether the Perl running it is a DEBUGGING build.  This
+ * Function to determine whether the perl running it is a DEBUGGING build.  This
  * is tested by trying out the "hash dump" debugging feature, which should usurp
- * the built-in values() function if and only if this is a DEBUGGING Perl, thus
+ * the built-in values() function if and only if this is a DEBUGGING perl, thus
  * providing a more reliable (though clearly still not infallible) indicator
  * than inspecting the contents of Config.pm.
  *
@@ -490,24 +499,24 @@ INCLUDE: ../CryptoCommon-xs.inc
 BOOT:
 {
 #ifndef FILTER_CRYPTO_DEBUG_MODE
-    /* C compile-time check that this not a DEBUGGING Perl.
+    /* C compile-time check that this not a DEBUGGING perl.
      * i.e. built with -DDEBUGGING. */
 #  ifdef DEBUGGING
-#    error Do not build with DEBUGGING Perl!
+#    error Do not build with DEBUGGING perl!
 #  endif
 
     /* Check that we are not running with DEBUGGING flags enabled.
      * e.g. perl -Dp <script>
-     * Do this check before the check for a DEBUGGING Perl below because that
+     * Do this check before the check for a DEBUGGING perl below because that
      * check currently seems to always trigger this check to fail even though
      * its alteration of $^D is local()ized. */
     if (PL_debug)
         croak("Can't run with DEBUGGING flags");
 
-    /* Check that we are not running under a DEBUGGING Perl.
+    /* Check that we are not running under a DEBUGGING perl.
      * i.e. built with -DDEBUGGING. */
     if (FilterCrypto_IsDebugPerl(aTHX))
-        croak("Can't run with DEBUGGING Perl");
+        croak("Can't run with DEBUGGING perl");
 
     /* Check that we are not running with the Perl debugger enabled.
      * e.g. perl -d:ptkdb <script> */
@@ -523,7 +532,7 @@ BOOT:
 #endif
 }
 
-# Import function, automatically called by Perl when processing the
+# Import function, automatically called by perl when processing the
 # "use Filter::Crypto::Decrypt;" line, to initialize the decryption filter's
 # context.
 
@@ -553,28 +562,9 @@ import(module, ...)
          * be automatically freed when the SV is destroyed, and store the
          * pointer within the MAGIC (specifically, as the mg_ptr member) so that
          * it cannot be messed with.
-         * From Perl 5.7.3 onwards we can use sv_magicext().  Pass 0 as the
-         * length of the mg_ptr member-to-be so that it is stored as-is, rather
-         * than a savepvn() copy of it being stored.
-         * Before 5.7.3 we have to do it the hard way, using sv_magic().  Note
-         * that this stores a savepvn() copy of the mg_ptr member-to-be for all
-         * lengths >= 0, so instead we just pass ((char *)NULL, 0) and assign
-         * ctx to the mg_ptr member later.  (We cannot pass (ctx, sizeof(*ctx))
-         * and then assign mg->mg_ptr back to ctx because the original ctx would
-         * need to be freed, but we cannot use FilterCrypto_FilterFree() to free
-         * it since savepvn() will only have made a shallow copy.) */
+         * Pass 0 as the length of the mg_ptr member-to-be so that it is stored
+         * as-is, rather than a savepvn() copy of it being stored. */
         filter_sv = newSV(0);
-#if (PERL_REVISION == 5 && \
-     (PERL_VERSION < 7 || (PERL_VERSION == 7 && PERL_SUBVERSION < 3)))
-        sv_magic(filter_sv, (SV *)NULL, PERL_MAGIC_ext, (char *)NULL, 0);
-        if (!(mg = mg_find(filter_sv, PERL_MAGIC_ext))) {
-            FilterCrypto_FilterFree(aTHX_ ctx);
-            ctx = NULL;
-            croak("Can't add MAGIC to decryption filter's SV");
-        }
-        mg->mg_ptr = (char *)ctx;
-        mg->mg_virtual = (MGVTBL *)&FilterCrypto_FilterSvMgVTBL;
-#else
         if (!(mg = sv_magicext(filter_sv, (SV *)NULL, PERL_MAGIC_ext,
                 (MGVTBL *)&FilterCrypto_FilterSvMgVTBL, (char *)ctx, 0)))
         {
@@ -582,7 +572,6 @@ import(module, ...)
             ctx = NULL;
             croak("Can't add MAGIC to decryption filter's SV");
         }
-#endif
 
         /* Store a pointer back to the MAGIC within the filter context structure
          * itself so that we can verify later that we have retrieved the correct
