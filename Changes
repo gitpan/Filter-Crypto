@@ -1,9 +1,14 @@
 ________________________________________________________________________________
 
-                          Filter::Crypto, Version 2.05
+                          Filter::Crypto, Version 2.06
 ________________________________________________________________________________
 
 Revision history for Perl extension Filter::Crypto.
+_________________
+
+v2.06 30 May 2014
+
+    - Simplified repository metadata for cleaner appearance on search.cpan.org.
 _________________
 
 v2.05 16 May 2014
@@ -31,7 +36,7 @@ v2.05 16 May 2014
       the exchanges between myself and Jan Dubois on the "perl5-porters" mailing
       list, 04-05 Mar 2010, for more details on this.
 
-    - Uploaded source code to GitHub and included repository URLS in meta data.
+    - Uploaded source code to GitHub and included repository URLs in metadata.
 
     - Included META.json file in addition to META.yml.
 

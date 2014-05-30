@@ -11,6 +11,7 @@ build_requires:
   FindBin: '0'
   Test::More: '0'
   blib: '0'
+  perl: '5.008001'
   strict: '0'
   warnings: '0'
 configure_requires:
@@ -26,6 +27,7 @@ configure_requires:
   Pod::Usage: '1.15'
   Text::Wrap: '0'
   constant: '0'
+  perl: '5.008001'
   strict: '0'
   warnings: '0'
 dynamic_config: 1
@@ -41,6 +43,20 @@ no_index:
     - inc
   package:
     - Filter::Crypto::_ConfigureBuild
+optional_features:
+  parfilter:
+    description: 'PAR::Filter support'
+    recommends:
+      File::Temp: '0'
+      PAR::Filter: '0'
+  podtest:
+    description: 'POD testing'
+    recommends:
+      Test::Pod: '1.00'
+  tempfile:
+    description: 'crypt_file -e tempfile support'
+    recommends:
+      File::Temp: '0'
 requires:
   Exporter: '0'
   Fcntl: '0'
@@ -49,5 +65,5 @@ requires:
   XSLoader: '0'
   perl: '5.008001'
 resources:
-  repository: git://github.com/steve-m-hay/Filter-Crypto.git
-version: '2.05'
+  repository: https://github.com/steve-m-hay/Filter-Crypto.git
+version: '2.06'
